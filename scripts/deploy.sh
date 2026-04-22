@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# Deploy IPK to DEVICE (default mypanel).
+# Build-or-reuse IPK, reliably hot-reload onto DEVICE (default mypanel).
 #
-# Dev-reload gotcha: webOS JS services that hold a TCP listener are treated as
-# a long-lived ActivityManager activity and do NOT die on ares-install or
-# ares-launch --close. To pick up new service.js code, we first POST /kill to
-# the running service — the new service.js has a /kill endpoint that calls
-# process.exit(0). If the running service is older than that feature, do a
-# one-time manual reboot of the panel. After that dev-loop is fast.
+# webOS gotcha: JS services with a TCP listener are ActivityManager-permanent
+# AND ActivityManager may reuse a cached service module on `process.exit`,
+# ignoring updated files on disk. The robust dev-loop is:
+#   1. POST /kill on the running service (fast path if present)
+#   2. ares-launch --close the app
+#   3. ares-install --remove the package (busts ActivityManager's module cache)
+#   4. ares-install the fresh IPK
+#   5. ares-launch
+# Skip the remove step with FAST=1 for a ~2s redeploy when you know the
+# cache isn't holding stale code.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./scripts/_nvm.sh
 
 DEVICE="${DEVICE:-mypanel}"
 APP_ID="com.lg.app.signage.dev"
-# Device host for the /kill probe — pulled from the ares device profile's host.
 DEVICE_HOST="${DEVICE_HOST:-$(awk -F'"' '/"name":[[:space:]]*"'"$DEVICE"'"/,/"host"/ {if ($2=="host") print $4}' "$HOME/.webos/signage/novacom-devices.json" 2>/dev/null | head -1)}"
 DEVICE_HOST="${DEVICE_HOST:-$DEVICE}"
 HTTP_PORT="${HTTP_PORT:-9999}"
@@ -26,14 +29,29 @@ if [ -z "$IPK" ]; then
 fi
 
 if [ "${SKIP_KILL:-0}" != "1" ]; then
-    echo "Asking running service on ${DEVICE_HOST}:${HTTP_PORT} to self-kill (for hot reload)"
-    curl -sS -m 2 -X POST "http://${DEVICE_HOST}:${HTTP_PORT}/kill" >/dev/null 2>&1 || echo "  (no response — probably not running or too old for /kill)"
-    # Give the process a moment to exit.
-    sleep 1
+    echo "1/5 POST /kill to running service (if any)"
+    curl -sS -m 2 -X POST "http://${DEVICE_HOST}:${HTTP_PORT}/kill" >/dev/null 2>&1 \
+        && echo "    service killed" \
+        || echo "    no response (fine — nothing to kill)"
 fi
 
-echo "Installing $IPK to device $DEVICE"
+if [ "${FAST:-0}" != "1" ]; then
+    echo "2/5 ares-launch --close $APP_ID"
+    ares-launch --device "$DEVICE" --close "$APP_ID" 2>&1 | tail -1 || true
+
+    echo "3/5 ares-install --remove $APP_ID  (busts ActivityManager module cache)"
+    ares-install --device "$DEVICE" --remove "$APP_ID" 2>&1 | tail -1 || true
+
+    # Short pause — ActivityManager has to finalize the uninstall before the next install.
+    sleep 2
+fi
+
+echo "4/5 ares-install $IPK"
 ares-install --device "$DEVICE" "$IPK"
 
-echo "Launching $APP_ID on $DEVICE"
+echo "5/5 ares-launch $APP_ID"
 ares-launch --device "$DEVICE" "$APP_ID"
+
+echo
+echo "Tip: verify with 'curl http://${DEVICE_HOST}:${HTTP_PORT}/health | jq .uptimeSeconds'"
+echo "     (fresh install should show uptime <10s)"

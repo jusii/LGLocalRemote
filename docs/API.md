@@ -142,6 +142,57 @@ The URI form maps `hdmi` → `HDMI`, `dp|dvi|rgb` → `RGB`, `ops|others` → `O
 
 **502:** `{ "ok": false, "error": "set_input_failed", "requested": {...}, "detail": {...} }`.
 
+## `GET /view`
+
+Returns the current "view layer" state. When `view` is non-null, the web app is rendering that HDMI source as a fullscreen `<video>` overlay instead of the status UI — and `/screenshot` will capture that video output.
+
+**200:**
+```json
+{ "ok": true, "view": { "src": "ext://hdmi:3", "setAt": "2026-04-22T13:04:21Z" } }
+```
+
+or when inactive:
+
+```json
+{ "ok": true, "view": null }
+```
+
+## `POST /view`
+
+Switch the web app between "status UI" and "rendering an external HDMI input fullscreen". The panel stays in SI mode throughout — our app and service keep running, so `/screenshot` continues to work.
+
+**Request body** (JSON):
+
+```json
+{ "src": "ext://hdmi:3" }
+```
+
+Shorthand also accepted: `{"src": "hdmi:3"}` / `{"src": "hdmi3"}`. To clear back to status UI: `{"src": null}`, `{"src": "app"}`, `{"src": "none"}`, or `{}`.
+
+**Switchover latency:** up to ~1 s (web app polls ping every 1 s and applies the change on next tick).
+
+**200:**
+```json
+{ "ok": true, "view": { "src": "ext://hdmi:3", "setAt": "2026-04-22T13:04:21Z" } }
+```
+
+**400:**
+- `{ "ok": false, "error": "invalid_json" }`
+- `{ "ok": false, "error": "bad_src", "expected": "ext://hdmi:1 | ext://dp:1 | ..." }`
+
+### Typical flow — "screenshot HDMI3"
+
+```sh
+curl -sS -X POST -H 'content-type: application/json' -d '{"src":"ext://hdmi:3"}' http://<panel>:9999/view
+sleep 2   # let the video element come up and sync
+curl -sS "http://<panel>:9999/screenshot?format=JPEG" -o hdmi3.jpg
+curl -sS -X POST -H 'content-type: application/json' -d '{"src":null}'         http://<panel>:9999/view
+```
+
+This keeps the panel in SI mode the whole time — service never dies, no relaunching needed.
+
+Note: HDCP-protected HDMI content still can't be captured (browser and IDCAP both refuse). For dev-time debugging against sources you control, this is fine; against protected content (e.g. some streaming devices), the video tag will render black in the capture.
+
 ## `POST /kill` (dev only)
 
 Exits the service process so the next `ares-launch` picks up new code. Used by `scripts/deploy.sh` as a hot-reload mechanism since webOS JS services holding a TCP listener don't idle-time-out.

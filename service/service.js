@@ -19,7 +19,8 @@ var state = {
     httpPort: HTTP_PORT,
     listenError: null,
     lastCapture: null,    // { at, bytes } | null
-    lastInput: null       // { at, type, index } | null
+    lastInput: null,      // { at, type, index } | null
+    view: null            // null = show app status; { src: "ext://hdmi:N", setAt } to render an input
 };
 
 function uptimeSeconds() {
@@ -36,7 +37,8 @@ service.register('ping', function (message) {
         httpReady: state.listenError == null,
         uptimeSeconds: uptimeSeconds(),
         lastCapture: state.lastCapture,
-        lastInput: state.lastInput
+        lastInput: state.lastInput,
+        view: state.view
     });
 });
 
@@ -107,7 +109,44 @@ function handleHealth(res) {
         uptimeSeconds: uptimeSeconds(),
         httpReady: state.listenError == null,
         lastCapture: state.lastCapture,
-        lastInput: state.lastInput
+        lastInput: state.lastInput,
+        view: state.view
+    });
+}
+
+function normalizeSrc(s) {
+    if (s == null) return null;
+    var t = String(s).trim();
+    if (!t || t.toLowerCase() === 'app' || t.toLowerCase() === 'status' || t.toLowerCase() === 'none') return null;
+    // Accept bare "hdmi:3" / "hdmi3" / "hdmi 3" / "HDMI3" as shorthand for ext://hdmi:3
+    var m = t.match(/^([a-z]+)[\s:]*(\d+)$/i);
+    if (m) return 'ext://' + m[1].toLowerCase() + ':' + m[2];
+    return t; // assume full ext://... URI
+}
+
+function handleViewGet(res) {
+    sendJson(res, 200, { ok: true, view: state.view });
+}
+
+function handleViewPost(req, res) {
+    var chunks = [];
+    req.on('data', function (c) { chunks.push(c); });
+    req.on('end', function () {
+        var body;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
+        catch (_) { sendJson(res, 400, { ok: false, error: 'invalid_json' }); return; }
+        var src = normalizeSrc(body.src != null ? body.src : body.source);
+        if (src == null) {
+            state.view = null;
+            sendJson(res, 200, { ok: true, view: null });
+            return;
+        }
+        if (!/^ext:\/\/[a-z]+:\d+$/i.test(src)) {
+            sendJson(res, 400, { ok: false, error: 'bad_src', expected: 'ext://hdmi:1 | ext://dp:1 | ... (or shorthand hdmi:3)' });
+            return;
+        }
+        state.view = { src: src, setAt: new Date().toISOString() };
+        sendJson(res, 200, { ok: true, view: state.view });
     });
 }
 
@@ -220,6 +259,8 @@ var server = http.createServer(function (req, res) {
     if (req.method === 'GET' && path === '/screenshot') return handleScreenshot(req, res);
     if (req.method === 'GET' && path === '/input') return handleInputGet(res);
     if (req.method === 'POST' && path === '/input') return handleInputPost(req, res);
+    if (req.method === 'GET' && path === '/view') return handleViewGet(res);
+    if (req.method === 'POST' && path === '/view') return handleViewPost(req, res);
 
     // Dev-only self-kill so a redeploy picks up new code without a panel reboot.
     if (req.method === 'POST' && path === '/kill') {
