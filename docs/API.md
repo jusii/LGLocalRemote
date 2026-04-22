@@ -29,6 +29,30 @@ Liveness + uptime. Safe to poll.
 
 `lastCapture` and `lastInput` are `null` until the respective endpoint has been called at least once.
 
+## `GET /device`
+
+Static platform facts pulled from IDCAP `configuration/property/get`. Useful for fleet inventory and as a canary that IDCAP-from-service is alive.
+
+**Request:** none.
+
+**200:**
+```json
+{
+  "ok": true,
+  "props": {
+    "model_name": "43UH5Q-EQ.BEUGLJP",
+    "serial_number": "XXXXXXXXXXXX",
+    "firmware_version": "03.34.12",
+    "platform_version": "9.0.0-146",
+    "webos_version": "9.0.0",
+    "idpn": 410,
+    "idcap_js_extension_version": "1.1.1"
+  }
+}
+```
+
+Any individual property that fails resolves to `{ "_error": { ... } }` in its slot but doesn't fail the whole response. Exact property names come from the IDCAP "Properties" mapping table (see vendor docs).
+
 ## `GET /screenshot`
 
 Captures the panel's current framebuffer via IDCAP (`idcap://utility/screen/capture`), reads the resulting file (`idcap://storage/file/read`), and streams the bytes as the HTTP body.

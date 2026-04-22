@@ -75,7 +75,30 @@ function sendJpeg(res, base64, size) {
     res.end(buf);
 }
 
+function getIdcapProperties(keys) {
+    // Issue a parallel get for each key; tolerate per-key failures.
+    return Promise.all(keys.map(function (key) {
+        return idcapCall('idcap://configuration/property/get', { key: key })
+            .then(function (cb) { return [key, cb && (cb.value != null ? cb.value : cb[key] != null ? cb[key] : cb)]; })
+            .catch(function (err) { return [key, { _error: err }]; });
+    })).then(function (pairs) {
+        return pairs.reduce(function (acc, p) { acc[p[0]] = p[1]; return acc; }, {});
+    });
+}
+
 // --- endpoint handlers ---
+function handleDevice(res) {
+    getIdcapProperties([
+        'model_name', 'serial_number', 'firmware_version',
+        'platform_version', 'webos_version', 'idpn',
+        'idcap_js_extension_version'
+    ]).then(function (props) {
+        sendJson(res, 200, { ok: true, props: props });
+    }).catch(function (err) {
+        sendJson(res, 502, { ok: false, error: 'device_info_failed', detail: err });
+    });
+}
+
 function handleHealth(res) {
     sendJson(res, 200, {
         ok: true,
@@ -193,6 +216,7 @@ var server = http.createServer(function (req, res) {
     var path = req.url.split('?')[0];
 
     if (req.method === 'GET' && path === '/health') return handleHealth(res);
+    if (req.method === 'GET' && path === '/device') return handleDevice(res);
     if (req.method === 'GET' && path === '/screenshot') return handleScreenshot(req, res);
     if (req.method === 'GET' && path === '/input') return handleInputGet(res);
     if (req.method === 'POST' && path === '/input') return handleInputPost(req, res);
