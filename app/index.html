@@ -94,13 +94,24 @@
             // Per LG docs: a <video> element with a child <source src="ext://hdmi:N">
             // composites the external input feed into the page.
             var video = document.createElement('video');
-            video.autoplay = true;
-            video.muted = true;
-            video.setAttribute('playsinline', '');
+            video.setAttribute('id', 'lglr-view-video');
+            video.setAttribute('autoplay', '');
+            video.setAttribute('width', '1920');
+            video.setAttribute('height', '1080');
+            // LG signage-specific: `texture` routes the video to the graphics plane
+            // (WebGL texture) so screen capture sees it. Without this attribute,
+            // video lives on a separate overlay plane that captureScreen can't read.
+            video.setAttribute('texture', '');
             var source = document.createElement('source');
             source.setAttribute('src', desiredSrc);
+            // MIME type telling WebAppMgr to use the webOS external-input pipeline.
+            // Without this, networkState goes to 3 (NO_SOURCE) and the video is black.
+            source.setAttribute('type', 'service/webos-external');
             video.appendChild(source);
             viewLayer.appendChild(video);
+
+            video.addEventListener('loadeddata', function () { log('video loadeddata ' + desiredSrc); });
+            video.addEventListener('error', function (e) { log('video error: ' + (video.error && video.error.code)); });
 
             var badge = document.createElement('div');
             badge.id = 'view-badge';
