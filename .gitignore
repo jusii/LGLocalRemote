@@ -1,0 +1,20 @@
+node_modules/
+*.ipk
+.DS_Store
+*.log
+.idea/
+.vscode/
+dist/
+build/
+
+# Scraped vendor docs — partner-gated content, do not push
+docs/vendor/
+out/
+cookies.txt
+*_cookies.txt
+*.cookies.txt
+cookies/
+
+# Per-developer tool state (Claude Code, editor, etc.)
+.claude/
+

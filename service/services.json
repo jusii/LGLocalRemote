@@ -1,0 +1,10 @@
+{
+  "id": "com.lg.app.signage.dev.remote",
+  "description": "LG Local Remote HTTP API service",
+  "services": [
+    {
+      "name": "com.lg.app.signage.dev.remote",
+      "description": "Exposes a LAN-bound HTTP API (health, screenshot, input) and proxies privileged SCAP calls to the web app via Luna"
+    }
+  ]
+}

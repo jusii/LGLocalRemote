@@ -1,0 +1,7 @@
+{
+  "name": "com.lg.app.signage.dev.remote",
+  "version": "0.0.1",
+  "description": "LG Local Remote HTTP API service — bridges HTTP to SCAP via the paired web app",
+  "main": "service.js",
+  "private": true
+}

@@ -1,0 +1,16 @@
+{
+  "id": "com.lg.app.signage.dev",
+  "version": "0.0.1",
+  "vendor": "LG Local Remote",
+  "type": "web",
+  "main": "index.html",
+  "title": "LG Local Remote",
+  "icon": "icon.png",
+  "largeIcon": "largeIcon.png",
+  "bgColor": "#000000",
+  "iconColor": "#000000",
+  "resolution": "1920x1080",
+  "uiRevision": 2,
+  "disableBackHistoryAPI": true,
+  "inspectable": true
+}

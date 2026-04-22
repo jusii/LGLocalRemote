@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>LG Local Remote</title>
+    <!-- webOS.js provides window.webOS.service.request for calling the JS service. -->
+    <script src="./js/webOS.js" type="text/javascript"></script>
+    <style>
+        html, body {
+            margin: 0; padding: 0; width: 100%; height: 100%;
+            background: #000; color: #0f0; font-family: monospace; font-size: 22px;
+        }
+        #app { padding: 40px; }
+        .row { margin-bottom: 10px; }
+        .label { color: #888; display: inline-block; min-width: 180px; }
+        .value { color: #0f0; }
+        .warn { color: #fc0; }
+        .err { color: #f44; }
+        h1 { color: #0f0; margin: 0 0 30px 0; font-size: 28px; }
+        #log {
+            margin-top: 24px; padding-top: 16px; border-top: 1px solid #222;
+            font-size: 14px; color: #6c6; white-space: pre-wrap;
+            height: 40vh; overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <h1>LG Local Remote</h1>
+        <div class="row"><span class="label">App:</span> <span class="value">com.lg.app.signage.dev</span></div>
+        <div class="row"><span class="label">Service:</span> <span class="value" id="svc-status">starting&hellip;</span></div>
+        <div class="row"><span class="label">HTTP listener:</span> <span class="value" id="http-status">&mdash;</span></div>
+        <div class="row"><span class="label">HTTP port:</span> <span class="value" id="http-port">&mdash;</span></div>
+        <div class="row"><span class="label">Uptime:</span> <span class="value" id="uptime">&mdash;</span></div>
+        <div class="row"><span class="label">Last screenshot:</span> <span class="value" id="last-cap">&mdash;</span></div>
+        <div class="row"><span class="label">Last input change:</span> <span class="value" id="last-inp">&mdash;</span></div>
+        <div id="log"></div>
+    </div>
+    <script>
+        var SERVICE_URI = 'luna://com.lg.app.signage.dev.remote/';
+        var logEl = document.getElementById('log');
+        var $ = function (id) { return document.getElementById(id); };
+
+        function log(msg) {
+            var ts = new Date().toISOString().substring(11, 19);
+            logEl.textContent += '[' + ts + '] ' + msg + '\n';
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function setStatus(id, text, cls) {
+            var el = $(id);
+            el.textContent = text;
+            el.className = 'value' + (cls ? ' ' + cls : '');
+        }
+
+        function pingService() {
+            if (typeof webOS === 'undefined' || !webOS.service) {
+                setStatus('svc-status', 'no webOS.service bridge', 'err');
+                log('webOS bridge not available — running outside webOS runtime?');
+                return;
+            }
+            webOS.service.request(SERVICE_URI, {
+                method: 'ping',
+                parameters: {},
+                onSuccess: function (res) {
+                    setStatus('svc-status', 'up');
+                    setStatus('http-status', res.httpReady ? 'listening' : 'not bound', res.httpReady ? null : 'err');
+                    setStatus('http-port', String(res.httpPort || '?'));
+                    setStatus('uptime', (res.uptimeSeconds || 0) + 's');
+                    if (res.lastCapture) {
+                        setStatus('last-cap', res.lastCapture.at + ' (' + (res.lastCapture.bytes || '?') + 'B)');
+                    }
+                    if (res.lastInput) {
+                        setStatus('last-inp', res.lastInput.at + ' — ' + res.lastInput.type + ':' + res.lastInput.index);
+                    }
+                },
+                onFailure: function (err) {
+                    setStatus('svc-status', 'error', 'err');
+                    log('ping failed: ' + JSON.stringify(err));
+                }
+            });
+        }
+
+        pingService();
+        setInterval(pingService, 3000);
+    </script>
+</body>
+</html>
