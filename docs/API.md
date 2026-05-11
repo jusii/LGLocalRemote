@@ -8,6 +8,21 @@ running inside the `com.lg.app.signage.dev` IPK on a webOS Signage panel.
 - **Content-Type:** JSON for everything except `/screenshot` (image/jpeg or image/png).
 - **Error shape:** `{ "ok": false, "error": "<code>", ...detail }`. HTTP status ≥ 400.
 
+## `GET /` — dev control UI
+
+Returns a small single-file HTML control page (`service/index.html`, read once at startup) that drives the rest of this API from a browser. Same wire format as any static file — `Content-Type: text/html`.
+
+The page exposes:
+- input switcher (`POST /input`) — buttons per input, with signal-detection dots
+- view switcher (`POST /view`) — render an HDMI input inside the SI app
+- screenshot button (`GET /screenshot`) — FHD PNG default, configurable W/H/format, inline preview + save link
+- collapsible device info (`GET /device`)
+- dev-only kill button (`POST /kill`)
+
+No polling — the page loads status on open and after each action. Solo-dev tool: no auth, no responsive layout.
+
+`GET /index.html` returns the same content.
+
 ## `GET /health`
 
 Liveness + uptime. Safe to poll.

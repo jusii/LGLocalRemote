@@ -5,11 +5,25 @@
 var Service = require('webos-service');
 var IDCAP = require('./idcap.js');
 var http = require('http');
+var fs = require('fs');
 
 var SERVICE_NAME = 'com.lg.app.signage.dev.remote';
 var HTTP_PORT = 9999;
 var VERSION = '0.0.1';
 var IDCAP_TIMEOUT_MS = 15000;
+
+// Dev UI: control page served from `GET /`. Read once at startup so we don't
+// re-stat the file on every request. If the file is missing for any reason
+// (shouldn't happen — it ships in the IPK alongside service.js), GET / returns
+// a small fallback error instead of crashing the service.
+var INDEX_HTML = null;
+var INDEX_HTML_ERR = null;
+try {
+    INDEX_HTML = fs.readFileSync(__dirname + '/index.html', 'utf8');
+} catch (e) {
+    INDEX_HTML_ERR = e && e.message ? e.message : String(e);
+    console.error('Failed to load index.html:', INDEX_HTML_ERR);
+}
 
 var service = new Service(SERVICE_NAME);
 var idcap = new IDCAP(service);
@@ -250,10 +264,25 @@ function handleInputPost(req, res) {
     });
 }
 
+function handleIndex(res) {
+    if (INDEX_HTML == null) {
+        res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('index.html missing: ' + INDEX_HTML_ERR);
+        return;
+    }
+    res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Length': Buffer.byteLength(INDEX_HTML, 'utf8'),
+        'Cache-Control': 'no-cache'
+    });
+    res.end(INDEX_HTML);
+}
+
 // --- HTTP server ---
 var server = http.createServer(function (req, res) {
     var path = req.url.split('?')[0];
 
+    if (req.method === 'GET' && (path === '/' || path === '/index.html')) return handleIndex(res);
     if (req.method === 'GET' && path === '/health') return handleHealth(res);
     if (req.method === 'GET' && path === '/device') return handleDevice(res);
     if (req.method === 'GET' && path === '/screenshot') return handleScreenshot(req, res);

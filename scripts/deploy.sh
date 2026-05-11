@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Build-or-reuse IPK, reliably hot-reload onto DEVICE (default mypanel).
+# Build-or-reuse IPK, reliably hot-reload onto $DEVICE (the ares-cli device
+# profile name; override via the DEVICE env var or edit the default below).
 #
 # webOS gotcha: JS services with a TCP listener are ActivityManager-permanent
 # AND ActivityManager may reuse a cached service module on `process.exit`,
