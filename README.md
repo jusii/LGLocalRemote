@@ -76,15 +76,17 @@ This is a developer / lab tool: **no authentication**, **LAN-only by design**, a
 git clone https://github.com/<you>/LGLocalRemote.git
 cd LGLocalRemote
 
-# Tell the scripts which paired device to target (default: "mypanel").
-export DEVICE=<your-paired-device-name>
+# One-shot: build (if needed) + deploy by IP or DNS name.
+./scripts/deploy.sh <panel-host-or-ip>
 
+# …or, the older form: target a paired ares-cli profile by name.
+export DEVICE=<your-paired-device-name>     # default: "mypanel"
 ./scripts/build.sh              # → ./com.lg.app.signage.dev_0.0.1_all.ipk
 ./scripts/deploy.sh             # install + launch on $DEVICE
 ./scripts/test.sh               # smoke-test /health, /input, /screenshot
 ```
 
-`scripts/deploy.sh` POSTs `/kill` to the running service before re-installing, so new code takes effect on the next launch. The first ever rollout (when no `/kill`-capable service exists yet) needs a one-time manual reboot of the panel to clear any prior service process.
+`scripts/deploy.sh <host>` looks the host up in `~/.webos/signage/novacom-devices.json` (DNS-resolving to an IP if needed) and uses the first paired signage profile that matches. If no profile matches, you'll get pairing instructions — `ares-setup-device` once per panel, then host-based deploys work hands-off. `scripts/deploy.sh` POSTs `/kill` to the running service before re-installing, so new code takes effect on the next launch. The first ever rollout (when no `/kill`-capable service exists yet) needs a one-time manual reboot of the panel to clear any prior service process.
 
 ### Hello world
 

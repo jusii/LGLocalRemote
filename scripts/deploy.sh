@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
-# Build-or-reuse IPK, reliably hot-reload onto $DEVICE (the ares-cli device
-# profile name; override via the DEVICE env var or edit the default below).
+# Build-or-reuse IPK, reliably hot-reload onto a target panel. Targeting modes:
+#   ./scripts/deploy.sh <host-or-ip>     # look up the paired ares-cli profile
+#                                        # whose host matches (DNS resolved if needed)
+#   DEVICE=<profile> ./scripts/deploy.sh # use a paired profile name directly
+#   ./scripts/deploy.sh                  # fall back to DEVICE env or the default
 #
 # webOS gotcha: JS services with a TCP listener are ActivityManager-permanent
 # AND ActivityManager may reuse a cached service module on `process.exit`,
@@ -16,11 +19,59 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 . ./scripts/_nvm.sh
 
-DEVICE="${DEVICE:-mypanel}"
 APP_ID="com.lg.app.signage.dev"
-DEVICE_HOST="${DEVICE_HOST:-$(awk -F'"' '/"name":[[:space:]]*"'"$DEVICE"'"/,/"host"/ {if ($2=="host") print $4}' "$HOME/.webos/signage/novacom-devices.json" 2>/dev/null | head -1)}"
-DEVICE_HOST="${DEVICE_HOST:-$DEVICE}"
 HTTP_PORT="${HTTP_PORT:-9999}"
+NOVACOM_DEVICES="$HOME/.webos/signage/novacom-devices.json"
+
+# Pluck a JSON field out of novacom-devices.json without depending on jq.
+# Args: <key-to-match> <value-to-match> <key-to-return>
+# e.g. lookup_profile_field host 192.168.2.75 name  →  "lgwebos9"
+lookup_profile_field() {
+    local match_key="$1" match_val="$2" return_key="$3"
+    [ -f "$NOVACOM_DEVICES" ] || return 0
+    python3 - "$NOVACOM_DEVICES" "$match_key" "$match_val" "$return_key" <<'PY' 2>/dev/null || true
+import json, sys
+path, mk, mv, rk = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+with open(path) as f:
+    devices = json.load(f)
+for d in devices:
+    if d.get("profile") != "signage":
+        continue
+    if str(d.get(mk)) == mv and d.get(rk):
+        print(d[rk])
+        break
+PY
+}
+
+if [ $# -ge 1 ] && [ -n "$1" ]; then
+    TARGET_HOST="$1"
+    DEVICE="$(lookup_profile_field host "$TARGET_HOST" name)"
+    if [ -z "$DEVICE" ]; then
+        RESOLVED_IP="$(getent hosts "$TARGET_HOST" 2>/dev/null | awk '{print $1; exit}')"
+        if [ -n "$RESOLVED_IP" ] && [ "$RESOLVED_IP" != "$TARGET_HOST" ]; then
+            DEVICE="$(lookup_profile_field host "$RESOLVED_IP" name)"
+        fi
+    fi
+    if [ -z "$DEVICE" ]; then
+        cat >&2 <<EOF
+No paired ares-cli signage profile matches host '$TARGET_HOST'.
+
+Pair the panel first (one-time, needs the dev-mode passphrase shown in the
+panel's Developer Mode app):
+
+    ares-setup-device
+
+Then re-run: ./scripts/deploy.sh $TARGET_HOST
+EOF
+        exit 1
+    fi
+    DEVICE_HOST="$TARGET_HOST"
+    echo "Targeting paired profile '$DEVICE' at $TARGET_HOST"
+else
+    DEVICE="${DEVICE:-mypanel}"
+    DEVICE_HOST="${DEVICE_HOST:-$(lookup_profile_field name "$DEVICE" host)}"
+    DEVICE_HOST="${DEVICE_HOST:-$DEVICE}"
+fi
 
 IPK="$(ls -t ./*.ipk 2>/dev/null | head -n1 || true)"
 if [ -z "$IPK" ]; then
