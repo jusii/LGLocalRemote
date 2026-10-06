@@ -15,6 +15,8 @@ Returns a small single-file HTML control page (`service/index.html`, read once a
 The page exposes:
 - input switcher (`POST /input`) — buttons per input, with signal-detection dots
 - view switcher (`POST /view`) — render an HDMI input inside the SI app
+- display controls (`POST /display`) — Blank / Unblank, optional "restore after N min"
+- picture controls (`POST /picture`) — backlight / brightness / contrast sliders + Apply, Night / Day preset buttons
 - screenshot button (`GET /screenshot`) — FHD PNG default, configurable W/H/format, inline preview + save link
 - collapsible device info (`GET /device`)
 - dev-only kill button (`POST /kill`)

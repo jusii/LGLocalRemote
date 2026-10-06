@@ -43,6 +43,10 @@
             border: 1px solid #3a424d; padding: 4px 6px; border-radius: 3px;
             font-family: inherit; font-size: 13px; width: 90px; }
         select { width: 80px; }
+        input[type=range] { width: 160px; accent-color: var(--accent); }
+        .pic-val { display: inline-block; width: 28px; text-align: right; color: var(--fg);
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+        .row + .row { margin-top: 8px; }
         label { color: var(--dim); font-size: 12px; display: inline-flex;
             align-items: center; gap: 4px; }
         #shot-status { color: var(--dim); font-size: 12px; margin: 8px 0; min-height: 16px;
@@ -91,6 +95,35 @@
         <div class="current" id="view-current">—</div>
         <div class="row" id="view-buttons"></div>
         <div class="err-msg" id="view-err"></div>
+    </section>
+
+    <section id="sec-display">
+        <h2>Display <small>POST /display — blanks the panel, main power + input stay on</small></h2>
+        <div class="current" id="display-current">—</div>
+        <div class="row">
+            <button id="display-off">Blank</button>
+            <label>restore after <input type="number" id="display-min" min="1" max="1440" placeholder="never"> min</label>
+            <button id="display-on">Unblank</button>
+        </div>
+        <div class="err-msg" id="display-err"></div>
+    </section>
+
+    <section id="sec-picture">
+        <h2>Picture <small>POST /picture — backlight / brightness / contrast</small></h2>
+        <div class="current" id="picture-current">—</div>
+        <div class="row">
+            <label>Backlight <input type="range" id="pic-backlight" min="0" max="100"><span class="pic-val" id="pic-backlight-v">—</span></label>
+            <label>Brightness <input type="range" id="pic-brightness" min="0" max="100"><span class="pic-val" id="pic-brightness-v">—</span></label>
+            <label>Contrast <input type="range" id="pic-contrast" min="0" max="100"><span class="pic-val" id="pic-contrast-v">—</span></label>
+        </div>
+        <div class="row">
+            <button id="pic-apply">Apply</button>
+            <button id="pic-night" title="Save current values, then dim">Night</button>
+            <button id="pic-day" title="Restore the values Night saved">Day</button>
+        </div>
+        <div class="current" id="picture-result"></div>
+        <div class="warn" id="picture-warn"></div>
+        <div class="err-msg" id="picture-err"></div>
     </section>
 
     <section id="sec-shot">
@@ -151,8 +184,11 @@ function fmtUptime(s) {
     return h + 'h ' + m + 'm';
 }
 
+var daySaved = false; // Day only makes sense while Night holds a snapshot
+
 function setBusy(busy) {
     document.querySelectorAll('button').forEach(function (b) { b.disabled = busy; });
+    if (!busy) $('pic-day').disabled = !daySaved;
 }
 
 async function jget(url) {
@@ -245,6 +281,113 @@ function renderView(viewData) {
     });
 }
 
+var PIC_KEYS = ['backlight', 'brightness', 'contrast'];
+
+function fmtTime(iso) {
+    return iso ? new Date(iso).toLocaleTimeString() : '';
+}
+
+// Display + picture come from /health, which reads both live from the panel.
+function renderDisplay(h) {
+    var d = h && h.display;
+    $('display-err').textContent = '';
+    $('display-off').classList.remove('active');
+    $('display-on').classList.remove('active');
+    if (!d) { $('display-current').textContent = '—'; return; }
+    if (d.error) {
+        $('display-current').textContent = 'current → ?';
+        $('display-err').textContent = 'display read failed: ' + JSON.stringify(d.error);
+        return;
+    }
+    $('display-current').textContent = 'current → ' + (d.mode === 'off' ? 'blanked' : d.mode === 'on' ? 'on' : d.mode) +
+        (d.restoreAt ? ' (restores at ' + fmtTime(d.restoreAt) + ')' : '');
+    if (d.mode === 'off') $('display-off').classList.add('active');
+    if (d.mode === 'on') $('display-on').classList.add('active');
+}
+
+function renderPicture(h) {
+    var p = h && h.picture;
+    $('picture-err').textContent = '';
+    $('pic-night').classList.remove('active');
+    daySaved = !!(p && p.preset === 'night' && p.saved);
+    $('pic-day').disabled = !daySaved;
+    $('pic-day').title = daySaved ? 'Restore the values Night saved' : 'Nothing to restore: press Night first';
+    if (!p) { $('picture-current').textContent = '—'; return; }
+    var v = p.values || {};
+    if (p.error) $('picture-err').textContent = 'picture read failed: ' + JSON.stringify(p.error);
+    PIC_KEYS.forEach(function (k) {
+        if (typeof v[k] === 'number') $('pic-' + k).value = v[k];
+        $('pic-' + k + '-v').textContent = typeof v[k] === 'number' ? v[k] : '?';
+    });
+    var cur = PIC_KEYS.map(function (k) { return k + ' ' + (v[k] != null && typeof v[k] !== 'object' ? v[k] : '?'); }).join(', ');
+    if (p.preset === 'night') {
+        $('pic-night').classList.add('active');
+        cur += ' — night (Day restores ' + PIC_KEYS.map(function (k) { return p.saved[k]; }).join('/') + ')';
+    }
+    $('picture-current').textContent = 'current → ' + cur;
+}
+
+async function postAndReload(url, body, errId) {
+    setBusy(true);
+    try {
+        var r = await jpost(url, body);
+        if (!r.ok) { $(errId).textContent = 'POST ' + url + ' failed: ' + JSON.stringify(r); return r; }
+    } catch (e) {
+        $(errId).textContent = 'POST ' + url + ' threw: ' + e.message;
+        return null;
+    } finally {
+        setBusy(false);
+    }
+    loadAll();
+    return r;
+}
+
+function picTriple(o) {
+    return o ? PIC_KEYS.map(function (k) { return o[k] != null ? o[k] : '?'; }).join('/') : '?';
+}
+
+// Report what a preset actually did. Night snapshots whatever is on the panel,
+// so pressing it while already dim saves dim values and Day "does nothing".
+async function applyPreset(preset) {
+    var hadSnapshot = daySaved;
+    $('picture-result').textContent = '';
+    $('picture-warn').textContent = '';
+    var r = await postAndReload('/picture', { preset: preset }, 'picture-err');
+    if (!r) return;
+    if (!r.ok) {
+        if (r.error === 'no_saved_picture') {
+            $('picture-err').textContent = 'Day: nothing to restore. Night hasn\u2019t been pressed, or Day already restored it.';
+        }
+        return;
+    }
+    var saved = r.picture && r.picture.saved;
+    if (preset === 'night') {
+        $('picture-result').textContent = 'Night: ' + (hadSnapshot ? 'kept earlier snapshot ' : 'saved ') +
+            picTriple(saved) + ', applied ' + picTriple(r.applied) + ' (backlight/brightness/contrast)';
+        if (saved && saved.backlight <= 10) {
+            $('picture-warn').textContent = '\u26a0 The saved values are already dim (backlight ' + saved.backlight +
+                '), so Day will restore these. Set daytime values with the sliders + Apply instead.';
+        }
+    } else {
+        $('picture-result').textContent = 'Day: restored ' + picTriple(r.applied) + ' (backlight/brightness/contrast)';
+    }
+}
+
+function blankDisplay() {
+    var body = { mode: 'off' };
+    var min = $('display-min').value.trim();
+    if (min) body.for_minutes = Number(min);
+    postAndReload('/display', body, 'display-err');
+}
+
+function applyPicture() {
+    var body = {};
+    PIC_KEYS.forEach(function (k) { body[k] = parseInt($('pic-' + k).value, 10); });
+    $('picture-result').textContent = '';
+    $('picture-warn').textContent = '';
+    postAndReload('/picture', body, 'picture-err');
+}
+
 function renderDevice(d) {
     if (!d || !d.ok) {
         $('device-info').textContent = 'GET /device failed: ' + JSON.stringify(d && d.error);
@@ -260,6 +403,8 @@ async function loadAll() {
             jget('/health'), jget('/input'), jget('/view'), jget('/device')
         ]);
         renderHeader(results[0].status === 'fulfilled' ? results[0].value : null);
+        renderDisplay(results[0].status === 'fulfilled' ? results[0].value : null);
+        renderPicture(results[0].status === 'fulfilled' ? results[0].value : null);
         renderInput(results[1].status === 'fulfilled' ? results[1].value : null);
         renderView(results[2].status === 'fulfilled' ? results[2].value : null);
         renderDevice(results[3].status === 'fulfilled' ? results[3].value : null);
@@ -377,6 +522,14 @@ async function killService() {
 $('refresh').onclick = loadAll;
 $('shot-take').onclick = takeScreenshot;
 $('kill-btn').onclick = killService;
+$('display-off').onclick = blankDisplay;
+$('display-on').onclick = function () { postAndReload('/display', { mode: 'on' }, 'display-err'); };
+$('pic-apply').onclick = applyPicture;
+$('pic-night').onclick = function () { applyPreset('night'); };
+$('pic-day').onclick = function () { applyPreset('day'); };
+PIC_KEYS.forEach(function (k) {
+    $('pic-' + k).oninput = function () { $('pic-' + k + '-v').textContent = this.value; };
+});
 
 loadAll();
 </script>
