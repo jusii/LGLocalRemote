@@ -23,7 +23,10 @@ HTTP client (LAN) ──HTTP──▶ JS service ──IDCAP──▶ panel midd
 - **`POST /view`** — render any HDMI input as a fullscreen `<video>` inside the app, without physically switching the panel input (so the API stays alive and you can screenshot the feed).
 - **`GET /input`** / **`GET /view`** — read current state including per-input signal-detection.
 - **`GET /device`** — model, serial, firmware, webOS version, IDPN (useful for fleet inventory).
-- **`GET /health`** — uptime, last capture, last input change.
+- **`POST /display`** — blank / unblank the panel with main power on (display mute), optionally auto-restoring after N minutes. The app, the API and the HDMI inputs stay up.
+- **`POST /picture`** — set backlight / brightness / contrast, or apply a `night` (save + dim) / `day` (restore) preset.
+- **`GET /display`** / **`GET /picture`** — read the current blanking state and picture values.
+- **`GET /health`** — uptime, last capture, last input change, display mode, picture values.
 - **`GET /`** — a self-contained dev control UI served straight from the service.
 
 Full endpoint reference: [docs/API.md](docs/API.md). Driving the API from another project (or a coding-agent session) to capture HDMI output: [docs/CONSUMERS.md](docs/CONSUMERS.md).
@@ -55,7 +58,7 @@ Why this specific tool vs. a USB capture card on the dev machine:
 
 Working and used day-to-day for HDMI capture in a small dev lab. Verified on an LG **43UH5Q-EQ.BEUGLJP** running webOS Signage **9.0.0-146**. Should work on any webOS Signage 6.0+ panel where IDCAP is available.
 
-This is a developer / lab tool: **no authentication**, **LAN-only by design**, and it ships in webOS dev mode (no LG partner signing required). Do not expose port 9999 to the public internet.
+This is a developer / lab tool: **no authentication**, **LAN-only by design**, and it installs in webOS developer mode. Do not expose port 9999 to the public internet.
 
 ## Quick start
 
@@ -107,6 +110,32 @@ curl -s "http://$PANEL:9999/screenshot?format=JPEG" -o hdmi3.jpg
 curl -s -X POST -H 'content-type: application/json' \
   -d '{"src":null}' http://$PANEL:9999/view
 ```
+
+### Dark or dim overnight, without powering off
+
+For a panel that is the HDMI sink for other devices: main power stays on, so the HDMI inputs keep presenting a connected display. Neither endpoint touches power-off, DPM, auto-standby or the 15-min-off feature.
+
+```sh
+J='content-type: application/json'
+
+# Blank the panel (display mute); the app, the API and the input are untouched
+curl -s -X POST -H "$J" -d '{"mode":"off"}' http://$PANEL:9999/display
+# …or blank it and restore automatically after 10 hours
+curl -s -X POST -H "$J" -d '{"mode":"off","for_minutes":600}' http://$PANEL:9999/display
+# Unblank (always works, also right after a service restart)
+curl -s -X POST -H "$J" -d '{"mode":"on"}' http://$PANEL:9999/display
+
+# Dim instead: save the current backlight/brightness/contrast and go low
+curl -s -X POST -H "$J" -d '{"preset":"night"}' http://$PANEL:9999/picture
+# Morning: restore what "night" saved
+curl -s -X POST -H "$J" -d '{"preset":"day"}' http://$PANEL:9999/picture
+# Or set values directly (any subset, 0–100)
+curl -s -X POST -H "$J" -d '{"backlight":30,"brightness":45}' http://$PANEL:9999/picture
+
+curl -s http://$PANEL:9999/display; curl -s http://$PANEL:9999/picture
+```
+
+Details (state persistence, error codes, overrides): [docs/API.md](docs/API.md#post-display).
 
 ## How it works
 
@@ -168,15 +197,15 @@ ares-inspect --device $DEVICE --service com.lg.app.signage.dev.remote  # Node in
 
 webOS Signage developer mode **whitelists exactly one app id for sideload-installable apps**: `com.lg.app.signage.dev`. Trying to install any other id fails with `Can install only 'com.lg.app.signage.dev' app on developer mode`. The id sitting in `com.lg.*` looks like it's claiming LG's reverse-DNS namespace, but it's just LG's own dev-mode magic id — we're not free to pick our own here.
 
-For production (signed) deployment you'd drop the `.dev` suffix and use whatever id the LG partner portal issues for your account.
+Outside developer mode you'd drop the `.dev` suffix and use your own app id.
 
 ## Going to production
 
-This repo ships in webOS dev mode: unsigned, dev-mode-reserved app id, and a `POST /kill` endpoint that's only intended for local development. Before any production / customer-facing deployment you should at minimum:
+This repo ships in webOS dev mode: dev-mode-reserved app id, and a `POST /kill` endpoint that's only intended for local development. Before any production / customer-facing deployment you should at minimum:
 
 1. Drop the `POST /kill` endpoint from `service/service.js`.
 2. Add authentication or a network-level allowlist in front of port 9999.
-3. Sign the IPK via the LG partner portal so it survives reboots without dev-mode renewal, can be registered as the panel's SI app (so it persists across HDMI input switches), and so you can use your own app id instead of `com.lg.app.signage.dev`.
+3. Move off developer mode: install the IPK through LG's regular install procedure (there is no signing step) so it doesn't depend on dev-mode renewal, can be registered as the panel's SI app (so it persists across HDMI input switches), and can use your own app id instead of `com.lg.app.signage.dev`.
 
 ## Acknowledgments
 

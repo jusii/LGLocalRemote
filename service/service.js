@@ -57,12 +57,13 @@ service.register('ping', function (message) {
 });
 
 // --- IDCAP helpers: promise with timeout + uniform error shape ---
-function idcapCall(uri, params) {
+function idcapCall(uri, params, timeoutMs) {
+    var limit = timeoutMs || IDCAP_TIMEOUT_MS;
     return new Promise(function (resolve, reject) {
         var settled = false;
         var to = setTimeout(function () {
-            if (!settled) { settled = true; reject({ error: 'idcap_timeout', uri: uri, timeoutMs: IDCAP_TIMEOUT_MS }); }
-        }, IDCAP_TIMEOUT_MS);
+            if (!settled) { settled = true; reject({ error: 'idcap_timeout', uri: uri, timeoutMs: limit }); }
+        }, limit);
         idcap.request(uri, {
             parameters: params || {},
             onSuccess: function (cb) {
@@ -91,10 +92,10 @@ function sendJpeg(res, base64, size) {
     res.end(buf);
 }
 
-function getIdcapProperties(keys) {
+function getIdcapProperties(keys, timeoutMs) {
     // Issue a parallel get for each key; tolerate per-key failures.
     return Promise.all(keys.map(function (key) {
-        return idcapCall('idcap://configuration/property/get', { key: key })
+        return idcapCall('idcap://configuration/property/get', { key: key }, timeoutMs)
             .then(function (cb) { return [key, cb && (cb.value != null ? cb.value : cb[key] != null ? cb[key] : cb)]; })
             .catch(function (err) { return [key, { _error: err }]; });
     })).then(function (pairs) {
@@ -116,15 +117,273 @@ function handleDevice(res) {
 }
 
 function handleHealth(res) {
-    sendJson(res, 200, {
-        ok: true,
-        service: SERVICE_NAME,
-        version: VERSION,
-        uptimeSeconds: uptimeSeconds(),
-        httpReady: state.listenError == null,
-        lastCapture: state.lastCapture,
-        lastInput: state.lastInput,
-        view: state.view
+    // Display/picture are read live from the panel with a short timeout so a
+    // stuck IDCAP bridge can't stall /health; failures land in the field.
+    Promise.all([
+        getDisplayMode(HEALTH_IDCAP_TIMEOUT_MS).catch(function (e) { return { error: e }; }),
+        getPicture(HEALTH_IDCAP_TIMEOUT_MS).catch(function (e) { return { error: e }; })
+    ]).then(function (r) {
+        sendJson(res, 200, {
+            ok: true,
+            service: SERVICE_NAME,
+            version: VERSION,
+            uptimeSeconds: uptimeSeconds(),
+            httpReady: state.listenError == null,
+            lastCapture: state.lastCapture,
+            lastInput: state.lastInput,
+            view: state.view,
+            display: displayReport(r[0]),
+            picture: pictureReport(r[1])
+        });
+    });
+}
+
+// --- display blanking + picture dimming ---
+// Blanking uses idcap://system/display/mute ("screen off" | "active"): panel
+// only, main power stays on, input untouched (IDCAP equivalent of SCAP
+// Power.setDisplayMode). Picture uses idcap://configuration/property with the
+// backlight/brightness/contrast keys (IDCAP equivalent of SCAP
+// Configuration.setPictureProperty). Nothing here touches power modes, DPM,
+// auto-standby or the 15-min-off feature.
+//
+// The pending auto-restore and the "night" snapshot persist to a small file
+// so they survive a service restart (not a panel reboot: it's under tmpdir).
+var HEALTH_IDCAP_TIMEOUT_MS = 3000;
+var DISPLAY_RETRY_MS = 60000;
+var MAX_FOR_MINUTES = 24 * 60;
+var PICTURE_KEYS = ['backlight', 'brightness', 'contrast'];
+var NIGHT_DEFAULTS = { backlight: 0, brightness: 0, contrast: 0 };
+var DISPLAY_STATE_FILE = require('path').join(require('os').tmpdir(), 'lglr-display-state.json');
+
+var displayState = loadDisplayState(); // { restoreAt: ms|null, savedPicture: {...}|null }
+var restoreTimer = null;
+
+function loadDisplayState() {
+    try {
+        var s = JSON.parse(fs.readFileSync(DISPLAY_STATE_FILE, 'utf8'));
+        return { restoreAt: s.restoreAt || null, savedPicture: s.savedPicture || null };
+    } catch (_) {
+        return { restoreAt: null, savedPicture: null };
+    }
+}
+
+function saveDisplayState() {
+    try {
+        fs.writeFileSync(DISPLAY_STATE_FILE, JSON.stringify(displayState));
+    } catch (e) {
+        console.error('Failed to persist display state:', e && e.message ? e.message : e);
+    }
+}
+
+function setDisplayMode(mode) {
+    return idcapCall('idcap://system/display/mute', { displaymode: mode === 'off' ? 'screen off' : 'active' });
+}
+
+function getDisplayMode(timeoutMs) {
+    return idcapCall('idcap://system/display/mute/get', {}, timeoutMs).then(function (cb) {
+        var raw = cb && cb.displaymode;
+        return { mode: raw === 'screen off' ? 'off' : raw === 'active' ? 'on' : raw, raw: raw };
+    });
+}
+
+function displayReport(d) {
+    var out = d && d.error ? { error: d.error } : { mode: d.mode, raw: d.raw };
+    out.restoreAt = displayState.restoreAt ? new Date(displayState.restoreAt).toISOString() : null;
+    return out;
+}
+
+// Auto-restore: on failure keep retrying, so a blank panel never depends on
+// someone noticing and sending "on" by hand.
+function armRestore() {
+    if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null; }
+    if (!displayState.restoreAt) return;
+    var delay = Math.max(0, displayState.restoreAt - Date.now());
+    restoreTimer = setTimeout(function () {
+        restoreTimer = null;
+        setDisplayMode('on').then(function () {
+            displayState.restoreAt = null;
+            saveDisplayState();
+        }).catch(function (err) {
+            console.error('Auto-restore of display failed, retrying:', JSON.stringify(err));
+            restoreTimer = setTimeout(armRestore, DISPLAY_RETRY_MS);
+        });
+    }, delay);
+}
+
+function cancelRestore() {
+    if (restoreTimer) { clearTimeout(restoreTimer); restoreTimer = null; }
+    if (displayState.restoreAt) { displayState.restoreAt = null; saveDisplayState(); }
+}
+
+function readJsonBody(req, res, cb) {
+    var chunks = [];
+    req.on('data', function (c) { chunks.push(c); });
+    req.on('end', function () {
+        var body;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); }
+        catch (_) { sendJson(res, 400, { ok: false, error: 'invalid_json' }); return; }
+        if (body == null || typeof body !== 'object' || Array.isArray(body)) {
+            sendJson(res, 400, { ok: false, error: 'invalid_json', expected: 'JSON object' });
+            return;
+        }
+        cb(body);
+    });
+}
+
+function handleDisplayGet(res) {
+    getDisplayMode().then(function (d) {
+        sendJson(res, 200, { ok: true, display: displayReport(d) });
+    }).catch(function (err) {
+        sendJson(res, 502, { ok: false, error: 'get_display_failed', detail: err, display: displayReport({ error: err }) });
+    });
+}
+
+function handleDisplayPost(req, res) {
+    readJsonBody(req, res, function (body) {
+        var mode = body.mode;
+        if (mode !== 'off' && mode !== 'on') {
+            sendJson(res, 400, { ok: false, error: 'bad_mode', expected: '{"mode":"off"|"on"}' });
+            return;
+        }
+        var forMinutes = body.for_minutes;
+        if (forMinutes != null) {
+            if (mode !== 'off') {
+                sendJson(res, 400, { ok: false, error: 'for_minutes_only_with_off' });
+                return;
+            }
+            if (typeof forMinutes !== 'number' || !(forMinutes > 0) || forMinutes > MAX_FOR_MINUTES) {
+                sendJson(res, 400, { ok: false, error: 'bad_for_minutes', expected: 'number > 0 and <= ' + MAX_FOR_MINUTES });
+                return;
+            }
+        }
+
+        if (mode === 'on') {
+            // Unconditional: no state read first, so this works right after a
+            // service restart whatever the panel was left in.
+            cancelRestore();
+            setDisplayMode('on').then(function () {
+                sendJson(res, 200, { ok: true, display: displayReport({ mode: 'on', raw: 'active' }) });
+            }).catch(function (err) {
+                sendJson(res, 502, { ok: false, error: 'set_display_failed', requested: 'on', detail: err });
+            });
+            return;
+        }
+
+        setDisplayMode('off').then(function () {
+            displayState.restoreAt = forMinutes != null ? Date.now() + Math.round(forMinutes * 60000) : null;
+            saveDisplayState();
+            armRestore();
+            sendJson(res, 200, { ok: true, display: displayReport({ mode: 'off', raw: 'screen off' }) });
+        }).catch(function (err) {
+            sendJson(res, 502, { ok: false, error: 'set_display_failed', requested: 'off', detail: err });
+        });
+    });
+}
+
+function getPicture(timeoutMs) {
+    return getIdcapProperties(PICTURE_KEYS, timeoutMs).then(function (props) {
+        var out = {};
+        PICTURE_KEYS.forEach(function (k) {
+            var v = props[k];
+            out[k] = (typeof v === 'string' && v.trim() !== '' && !isNaN(Number(v))) ? Number(v) : v;
+        });
+        return out;
+    });
+}
+
+function pictureErrors(pic) {
+    return PICTURE_KEYS.filter(function (k) { return typeof pic[k] !== 'number'; });
+}
+
+function pictureReport(p) {
+    var out = p && p.error ? { error: p.error } : { values: p };
+    out.preset = displayState.savedPicture ? 'night' : null;
+    out.saved = displayState.savedPicture;
+    return out;
+}
+
+// property/set takes the value as a string. Keys are set one at a time so a
+// failure reports exactly what was and wasn't applied.
+function setPicture(values) {
+    var applied = {};
+    return PICTURE_KEYS.filter(function (k) { return values[k] != null; }).reduce(function (p, k) {
+        return p.then(function () {
+            return idcapCall('idcap://configuration/property/set', { key: k, value: String(values[k]) }).then(function () {
+                applied[k] = values[k];
+            }, function (err) {
+                throw { error: 'set_property_failed', key: k, detail: err, applied: applied };
+            });
+        });
+    }, Promise.resolve()).then(function () { return applied; });
+}
+
+function handlePictureGet(res) {
+    getPicture().then(function (p) {
+        sendJson(res, 200, { ok: true, picture: pictureReport(p) });
+    }).catch(function (err) {
+        sendJson(res, 502, { ok: false, error: 'get_picture_failed', detail: err });
+    });
+}
+
+function handlePicturePost(req, res) {
+    readJsonBody(req, res, function (body) {
+        var values = {};
+        var bad = [];
+        Object.keys(body).forEach(function (k) {
+            if (k === 'preset') return;
+            var v = body[k];
+            if (PICTURE_KEYS.indexOf(k) === -1) bad.push(k);
+            else if (typeof v !== 'number' || v !== Math.floor(v) || v < 0 || v > 100) bad.push(k);
+            else values[k] = v;
+        });
+        if (bad.length) {
+            sendJson(res, 400, { ok: false, error: 'bad_fields', fields: bad, expected: 'backlight/brightness/contrast: integers 0-100; preset: "night"|"day"' });
+            return;
+        }
+        var preset = body.preset;
+        if (preset != null && preset !== 'night' && preset !== 'day') {
+            sendJson(res, 400, { ok: false, error: 'bad_preset', expected: '"night" | "day"' });
+            return;
+        }
+        if (preset == null && !Object.keys(values).length) {
+            sendJson(res, 400, { ok: false, error: 'missing_fields', example: { backlight: 20 } });
+            return;
+        }
+
+        var work;
+        if (preset === 'night') {
+            // Snapshot only if we don't already hold one, so a second "night"
+            // can't overwrite the day values with night values.
+            var snapshot = displayState.savedPicture ? Promise.resolve() : getPicture().then(function (cur) {
+                var missing = pictureErrors(cur);
+                if (missing.length) throw { error: 'snapshot_failed', keys: missing, read: cur };
+                displayState.savedPicture = cur;
+                saveDisplayState();
+            });
+            work = snapshot.then(function () {
+                return setPicture(Object.assign({}, NIGHT_DEFAULTS, values));
+            });
+        } else if (preset === 'day') {
+            if (!displayState.savedPicture) {
+                sendJson(res, 409, { ok: false, error: 'no_saved_picture', hint: 'nothing saved by "night"; set values explicitly, e.g. {"backlight":100,"brightness":50,"contrast":85}' });
+                return;
+            }
+            work = setPicture(Object.assign({}, displayState.savedPicture, values)).then(function (applied) {
+                displayState.savedPicture = null;
+                saveDisplayState();
+                return applied;
+            });
+        } else {
+            work = setPicture(values);
+        }
+
+        work.then(function (applied) {
+            return getPicture().catch(function (e) { return { error: e }; }).then(function (p) {
+                sendJson(res, 200, { ok: true, applied: applied, picture: pictureReport(p) });
+            });
+        }).catch(function (err) {
+            sendJson(res, 502, { ok: false, error: 'set_picture_failed', preset: preset || null, detail: err });
+        });
     });
 }
 
@@ -290,6 +549,10 @@ var server = http.createServer(function (req, res) {
     if (req.method === 'POST' && path === '/input') return handleInputPost(req, res);
     if (req.method === 'GET' && path === '/view') return handleViewGet(res);
     if (req.method === 'POST' && path === '/view') return handleViewPost(req, res);
+    if (req.method === 'GET' && path === '/display') return handleDisplayGet(res);
+    if (req.method === 'POST' && path === '/display') return handleDisplayPost(req, res);
+    if (req.method === 'GET' && path === '/picture') return handlePictureGet(res);
+    if (req.method === 'POST' && path === '/picture') return handlePicturePost(req, res);
 
     // Dev-only self-kill so a redeploy picks up new code without a panel reboot.
     if (req.method === 'POST' && path === '/kill') {
@@ -309,3 +572,7 @@ server.on('error', function (err) {
 server.listen(HTTP_PORT, '0.0.0.0', function () {
     console.log('LG Local Remote HTTP API listening on 0.0.0.0:' + HTTP_PORT);
 });
+
+// Resume a pending auto-restore after a service restart (fires at once if the
+// deadline has already passed).
+armRestore();

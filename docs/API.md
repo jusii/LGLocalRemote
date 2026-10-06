@@ -38,11 +38,16 @@ Liveness + uptime. Safe to poll.
   "uptimeSeconds": 42,
   "httpReady": true,
   "lastCapture": { "at": "2026-04-22T12:04:12.345Z", "bytes": 120543, "uri": "file://internal/...", "format": "JPEG" },
-  "lastInput":   { "at": "2026-04-22T12:04:09.111Z", "type": "HDMI", "index": 0 }
+  "lastInput":   { "at": "2026-04-22T12:04:09.111Z", "type": "HDMI", "index": 0 },
+  "view": null,
+  "display": { "mode": "on", "raw": "active", "restoreAt": null },
+  "picture": { "values": { "backlight": 80, "brightness": 50, "contrast": 85 }, "preset": null, "saved": null }
 }
 ```
 
 `lastCapture` and `lastInput` are `null` until the respective endpoint has been called at least once.
+
+`display` and `picture` are read live from the panel (same shape as `GET /display` / `GET /picture`) with a 3 s timeout each. If a read fails, that field carries `{ "error": … }` instead and `/health` still returns 200.
 
 ## `GET /device`
 
@@ -208,6 +213,70 @@ This keeps the panel in SI mode the whole time — service never dies, no relaun
 
 Note: HDCP-protected HDMI content still can't be captured (browser and IDCAP both refuse). For dev-time debugging against sources you control, this is fine; against protected content (e.g. some streaming devices), the video tag will render black in the capture.
 
+## `GET /display`
+
+Whether the panel is blanked. Reads `idcap://system/display/mute/get`.
+
+**200:**
+```json
+{ "ok": true, "display": { "mode": "off", "raw": "screen off", "restoreAt": "2026-10-07T05:00:00.000Z" } }
+```
+
+`mode` is `"on"` / `"off"` (`raw` is the IDCAP value: `"active"` / `"screen off"`). `restoreAt` is the pending auto-restore time, or `null`.
+
+## `POST /display`
+
+Blank or unblank the panel **with main power on** via `idcap://system/display/mute` (the IDCAP equivalent of SCAP `Power.setDisplayMode`). Only the panel goes dark: the app, the service, the HTTP API and the selected input are unaffected. No power-off, DPM, auto-standby or 15-min-off setting is touched.
+
+**Body:**
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `mode` | `"off"` \| `"on"` | Required |
+| `for_minutes` | number, `0 < n ≤ 1440` | Only with `"off"`. Restores automatically after N minutes. |
+
+```sh
+curl -sS -X POST -H 'content-type: application/json' -d '{"mode":"off"}' http://$PANEL:9999/display
+curl -sS -X POST -H 'content-type: application/json' -d '{"mode":"off","for_minutes":600}' http://$PANEL:9999/display
+curl -sS -X POST -H 'content-type: application/json' -d '{"mode":"on"}'  http://$PANEL:9999/display
+```
+
+**200:** `{ "ok": true, "display": { "mode": "off", "raw": "screen off", "restoreAt": "…" | null } }`
+
+- `{"mode":"on"}` is unconditional: it sends `"active"` without reading state first, so it works right after a service restart. It also cancels any pending auto-restore.
+- A new `{"mode":"off"}` replaces the pending auto-restore; leave `for_minutes` out to cancel it.
+- The auto-restore deadline is kept in `$TMPDIR/lglr-display-state.json`, so it survives a service restart: on startup the timer is re-armed, or fires at once if the deadline has passed. It does not survive a panel reboot. If the restore call fails, it is retried every 60 s.
+
+## `GET /picture`
+
+Current `backlight`, `brightness`, `contrast` (0–100), read via `idcap://configuration/property/get`. Values belong to the current picture mode.
+
+**200:**
+```json
+{ "ok": true, "picture": { "values": { "backlight": 80, "brightness": 50, "contrast": 85 }, "preset": null, "saved": null } }
+```
+
+`preset` is `"night"` while a night snapshot is held; `saved` is that snapshot (what `"day"` will restore).
+
+## `POST /picture`
+
+Set any subset of `backlight`, `brightness`, `contrast` (integers 0–100) via `idcap://configuration/property/set` (IDCAP equivalent of SCAP `Configuration.setPictureProperty`), or apply a preset.
+
+```sh
+curl -sS -X POST -H 'content-type: application/json' -d '{"backlight":20}' http://$PANEL:9999/picture
+curl -sS -X POST -H 'content-type: application/json' -d '{"preset":"night"}' http://$PANEL:9999/picture
+curl -sS -X POST -H 'content-type: application/json' -d '{"preset":"night","backlight":10}' http://$PANEL:9999/picture
+curl -sS -X POST -H 'content-type: application/json' -d '{"preset":"day"}' http://$PANEL:9999/picture
+```
+
+- `"night"` saves the current three values, then applies `backlight 0, brightness 0, contrast 0`. Any field sent alongside overrides that default. If a snapshot is already held (a second `"night"`), it is kept, so day values are never overwritten with night values.
+- `"day"` restores the snapshot (fields sent alongside override it) and then clears it. With no snapshot it returns **409 `no_saved_picture`** and changes nothing.
+- The snapshot lives in the same state file as the display auto-restore (survives a service restart, not a panel reboot).
+- Keys are set one at a time. On failure the 502 `detail` names the failing `key` and what was already `applied`.
+- If Smart Energy Saving or an automatic brightness-control mode is active, the panel may override the backlight value. This endpoint does not change those settings.
+
+**200:** `{ "ok": true, "applied": { "backlight": 0, … }, "picture": { …same as GET… } }`
+
 ## `POST /kill` (dev only)
 
 Exits the service process so the next `ares-launch` picks up new code. Used by `scripts/deploy.sh` as a hot-reload mechanism since webOS JS services holding a TCP listener don't idle-time-out.
@@ -230,10 +299,16 @@ No authentication. Exposed on the same LAN port as the rest of the API. Remove b
 | 502 | `no_data` / `empty_data` / `decode_failed` | IDCAP file/read returned nothing usable |
 | 502 | `get_input_failed` | IDCAP externalinput/get error |
 | 502 | `set_input_failed` | IDCAP externalinput/set error |
+| 400 | `bad_mode` | POST /display `mode` wasn't `"off"` / `"on"` |
+| 400 | `bad_for_minutes` / `for_minutes_only_with_off` | Invalid `for_minutes`, or sent with `"on"` |
+| 400 | `bad_fields` / `missing_fields` / `bad_preset` | POST /picture: unknown or out-of-range field, nothing to set, or unknown preset |
+| 409 | `no_saved_picture` | `{"preset":"day"}` with no night snapshot held |
+| 502 | `get_display_failed` / `set_display_failed` | IDCAP system/display/mute error |
+| 502 | `get_picture_failed` / `set_picture_failed` | IDCAP configuration/property error (`snapshot_failed` inside `detail` if `"night"` couldn't read current values) |
 | 504 | *(not emitted — IDCAP calls have an internal 15s timeout surfaced via 502 `idcap_timeout`)* | |
 
 ## Platform notes
 
 - Target hardware: LG UH5Q signage. Verified on **43UH5Q-EQ.BEUGLJP**, webOS **9.0.0-146**, IDPN 4xx. Should work on any webOS Signage 6.0+ panel where IDCAP is available.
 - IDCAP middleware on the device: `com.webos.service.commercial.scapadapter`. All calls route via `luna://com.webos.service.idcapmw.mwcommand/callidcap`.
-- Source IDCAP reference: `idcap://utility/screen/capture`, `idcap://externalinput/{get,set}`, `idcap://externalinput/inputlist/get`, `idcap://storage/file/read`.
+- Source IDCAP reference: `idcap://utility/screen/capture`, `idcap://externalinput/{get,set}`, `idcap://externalinput/inputlist/get`, `idcap://storage/file/read`, `idcap://system/display/mute{,/get}`, `idcap://configuration/property/{get,set}`.

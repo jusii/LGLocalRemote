@@ -77,15 +77,33 @@ ares-launch --device <your-paired-device-name> com.lg.app.signage.dev
 
 Requires `@webos-tools/cli` + a paired device profile. If you don't have pairing, ask whoever set the panel up.
 
+### Blanking / dimming the panel (shared panel: coordinate first)
+
+The panel can go dark or dim with main power on, so devices on its HDMI inputs keep seeing a connected display. Blanking does not stop the app or the API, and does not change the input.
+
+```sh
+BASE="http://<panel-host>:9999"; J='content-type: application/json'
+curl -sS -X POST -H "$J" -d '{"mode":"off","for_minutes":30}' "$BASE/display"   # blank, auto-restore in 30 min
+curl -sS -X POST -H "$J" -d '{"mode":"on"}' "$BASE/display"                     # unblank (always safe to send)
+curl -sS -X POST -H "$J" -d '{"preset":"night"}' "$BASE/picture"                # save current values + dim
+curl -sS -X POST -H "$J" -d '{"preset":"day"}' "$BASE/picture"                  # restore saved values
+curl -sS -X POST -H "$J" -d '{"backlight":40}' "$BASE/picture"                  # any of backlight/brightness/contrast, 0-100
+curl -sS "$BASE/display"; curl -sS "$BASE/picture"                              # read state (also in /health)
+```
+
+If you blank the panel, prefer `for_minutes` so it comes back even if you forget. Send `{"mode":"on"}` when you're done.
+
 ### Other endpoints (in case you need them)
 
 | Method + path | Purpose |
 |---------------|---------|
-| `GET /health` | Uptime, version, last capture, last input |
+| `GET /health` | Uptime, version, last capture, last input, display mode, picture values |
 | `GET /device` | Model, serial, firmware, webOS version, IDPN |
 | `GET /input` | Current physical input + full list of inputs with signal detection |
 | `POST /input` | **Dangerous.** Physically switches the panel's input, kills the SI app. Prefer `/view`. |
 | `GET /view` | Current view-overlay state |
 | `POST /view` | Set the view-overlay (`{src: "ext://hdmi:3"}` or `{src: null}` to clear) |
+| `GET /display` / `POST /display` | Panel blanking: `{"mode":"off"\|"on"}`, optional `"for_minutes": N` auto-restore |
+| `GET /picture` / `POST /picture` | `backlight` / `brightness` / `contrast` 0–100, or `{"preset":"night"\|"day"}` |
 
 Full reference: [docs/API.md](API.md).
