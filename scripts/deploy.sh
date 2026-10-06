@@ -25,7 +25,7 @@ NOVACOM_DEVICES="$HOME/.webos/signage/novacom-devices.json"
 
 # Pluck a JSON field out of novacom-devices.json without depending on jq.
 # Args: <key-to-match> <value-to-match> <key-to-return>
-# e.g. lookup_profile_field host 192.168.2.75 name  →  "lgwebos9"
+# e.g. lookup_profile_field host 192.0.2.10 name  →  "mypanel"
 lookup_profile_field() {
     local match_key="$1" match_val="$2" return_key="$3"
     [ -f "$NOVACOM_DEVICES" ] || return 0
