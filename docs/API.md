@@ -47,7 +47,9 @@ Liveness + uptime. Safe to poll.
 }
 ```
 
-`lastCapture` and `lastInput` are `null` until the respective endpoint has been called at least once.
+`lastCapture` is `null` until `GET /screenshot` has been called at least once.
+
+`lastInput` is the last input **change**: it stays `null` until `POST /input` switches the input, and a plain `GET /input` does **not** update it.
 
 `display` and `picture` are read live from the panel (same shape as `GET /display` / `GET /picture`) with a 3 s timeout each. If a read fails, that field carries `{ "error": … }` instead and `/health` still returns 200.
 

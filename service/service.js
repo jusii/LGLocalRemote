@@ -33,7 +33,7 @@ var state = {
     httpPort: HTTP_PORT,
     listenError: null,
     lastCapture: null,    // { at, bytes } | null
-    lastInput: null,      // { at, type, index } | null
+    lastInput: null,      // { at, type, index } | null — last input CHANGE (POST /input only)
     view: null            // null = show app status; { src: "ext://hdmi:N", setAt } to render an input
 };
 
@@ -473,7 +473,9 @@ function handleInputGet(res) {
     ]).then(function (results) {
         var current = results[0];
         var list = results[1];
-        state.lastInput = { at: new Date().toISOString(), type: current.type, index: current.index };
+        // Deliberately does NOT stamp state.lastInput: this is a READ. Stamping here made
+        // /health's lastInput read as "last input change" when it meant "last input read",
+        // which sent a debugging session down the wrong path. Only handleInputPost stamps it.
         sendJson(res, 200, {
             ok: true,
             current: { type: current.type, index: current.index },
